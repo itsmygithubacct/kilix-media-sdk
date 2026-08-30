@@ -1,0 +1,4 @@
+# Component ownership. Reviews are assigned by path.
+/components/kilix-acoustic-link/  @itsmygithubacct
+/manifest.toml                    @itsmygithubacct
+/.github/                         @itsmygithubacct

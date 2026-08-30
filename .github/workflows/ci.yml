@@ -1,0 +1,33 @@
+name: kilix-media-sdk
+
+# Path-filtered per component: a component is only built and tested when its
+# own tree, the manifest or this workflow changes.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  kilix-acoustic-link:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make -C components/kilix-acoustic-link
+      - name: Offline build check
+        run: make -C components/kilix-acoustic-link check-offline
+      - name: Test (normal and sanitizers)
+        run: make -C components/kilix-acoustic-link test
+      - name: Staged install and uninstall
+        run: |
+          make -C components/kilix-acoustic-link install \
+            DESTDIR="${RUNNER_TEMP}/stage" PREFIX=/usr
+          test -f "${RUNNER_TEMP}/stage/usr/lib/libkilix-acoustic-link.a"
+          make -C components/kilix-acoustic-link uninstall \
+            DESTDIR="${RUNNER_TEMP}/stage" PREFIX=/usr
+          test -z "$(find "${RUNNER_TEMP}/stage" -type f -o -type l)"
+      - name: Vendored third-party digest
+        run: |
+          cd components/kilix-acoustic-link/third_party/ggwave
+          find . -type f | sort | xargs sha256sum | sha256sum \
+            | grep -q 24b5b18deb767e4ce1156aed0f9359b79c6ade2b647848ca3c6a255827307de2

@@ -1,0 +1,44 @@
+# kilix-media-sdk release manifest.
+#
+# This manifest records what this repository contains. It does not assert
+# acceptance, a release, or a physical qualification result.
+
+[sdk]
+name = "kilix-media-sdk"
+state = "built-awaiting-independent-acceptance"
+components_present = 1
+components_planned = 6
+
+[[component]]
+name = "kilix-acoustic-link"
+path = "components/kilix-acoustic-link"
+version = "0.1.0"
+tag_prefix = "kilix-acoustic-link/v"
+language = "c11"
+public_header = "include/kilix_acoustic_link.h"
+abi_state = "candidate"          # KAL1 wire version 1 is NOT frozen
+physical_profiles_graduated = "0/6"
+network_access_at_build = false
+network_access_at_test = false
+
+[[component.third_party]]
+name = "ggwave"
+upstream = "https://github.com/ggerganov/ggwave"
+tag = "ggwave-v0.4.3"
+commit = "a38e38b7373f9adf45baf737a104206664b225a1"
+licence = "MIT"
+delivery = "vendored-source"
+vendored_tree_sha256 = "24b5b18deb767e4ce1156aed0f9359b79c6ade2b647848ca3c6a255827307de2"
+
+# Named in the F111 placement decision, NOT migrated and NOT present here.
+# Their migration is a separate reviewed history-preserving move owned by
+# their own streams.
+[planned]
+components = [
+    "kilix-mask",
+    "kilix-motion-detect",
+    "kilix-object-detect",
+    "kilix-sound-detect",
+    "kilix-rtsp",
+]
+migrated = 0

@@ -1,0 +1,10 @@
+prefix=@PREFIX@
+libdir=@LIBDIR@
+includedir=@INCLUDEDIR@
+
+Name: kilix-acoustic-link
+Description: Bounded reliable short-message transfer over caller-owned PCM
+Version: @VERSION@
+Libs: -L${libdir} -lkilix-acoustic-link
+Libs.private: -lstdc++ -lm
+Cflags: -I${includedir}
