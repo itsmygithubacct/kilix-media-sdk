@@ -11,6 +11,7 @@
  */
 #include "kilix_acoustic_link.h"
 #include "kal_audio.h"
+#include "kal_channel.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -36,6 +37,7 @@ struct cli_options {
     uint8_t role;
     uint8_t allow_audio;
     uint8_t allow_high_frequency;
+    uint8_t profile_selected;
     unsigned int seconds;
 };
 
@@ -52,6 +54,7 @@ static void usage(FILE *stream) {
         "  listen      [--seconds N]\n"
         "  calibrate   [--show]\n"
         "  loopback    --text TEXT [--output-pcm FILE]\n"
+        "  channel     [--profile NAME] [--seconds TRIALS]\n"
         "  probe\n"
         "  dump-frame  --hex <128 hex characters>\n"
         "  version\n"
@@ -662,6 +665,155 @@ finish:
     return 0;
 }
 
+
+struct cli_channel_cell {
+    const char *name;
+    enum kal_channel_kind kind;
+    double parameter;
+    double secondary;
+};
+
+static const struct cli_channel_cell cli_channel_cells[] = {
+    {"clean",           KAL_CHANNEL_CLEAN,      0.0,   0.0},
+    {"awgn-20dB",       KAL_CHANNEL_AWGN,      20.0,   0.0},
+    {"awgn-6dB",        KAL_CHANNEL_AWGN,       6.0,   0.0},
+    {"awgn-0dB",        KAL_CHANNEL_AWGN,       0.0,   0.0},
+    {"awgn-minus9dB",   KAL_CHANNEL_AWGN,      -9.0,   0.0},
+    {"awgn-minus12dB",  KAL_CHANNEL_AWGN,     -12.0,   0.0},
+    {"gain-0.25x",      KAL_CHANNEL_GAIN,       0.25,  0.0},
+    {"gain-0.003x",     KAL_CHANNEL_GAIN,       0.003, 0.0},
+    {"clip-0.5",        KAL_CHANNEL_CLIP,       0.5,   0.0},
+    {"drift-plus100",   KAL_CHANNEL_DRIFT,    100.0,   0.0},
+    {"drift-plus1000",  KAL_CHANNEL_DRIFT,   1000.0,   0.0},
+    {"drift-plus2000",  KAL_CHANNEL_DRIFT,   2000.0,   0.0},
+    {"drift-plus5000",  KAL_CHANNEL_DRIFT,   5000.0,   0.0},
+    {"drift-plus10000", KAL_CHANNEL_DRIFT,  10000.0,   0.0},
+    {"echo-10ms-0.5",   KAL_CHANNEL_ECHO,     10.0,    0.5},
+    {"echo-20ms-0.9",   KAL_CHANNEL_ECHO,     20.0,    0.9}
+};
+
+/* One beacon frame through the engine, a named impairment, and back. */
+static int channel_trial(uint8_t profile, const struct cli_channel_cell *cell,
+                         uint64_t seed, uint8_t allow_high_frequency) {
+    kal_options tx_options;
+    kal_options rx_options;
+    kal_link *tx = NULL;
+    kal_link *rx = NULL;
+    kal_stats stats;
+    struct kal_channel channel;
+    uint8_t payload[KAL_MAX_BEACON_BYTES];
+    uint8_t received[CLI_MAX_INPUT_BYTES];
+    size_t size = 0u;
+    int16_t *clean = NULL;
+    int16_t *damaged = NULL;
+    size_t capacity;
+    size_t damaged_capacity;
+    size_t written = 0u;
+    size_t produced = 0u;
+    size_t index;
+    int ok = 0;
+
+    memset(&tx_options, 0, sizeof tx_options);
+    tx_options.sample_rate = KAL_SAMPLE_RATE;
+    tx_options.profile = profile;
+    tx_options.modem = (uint8_t)KAL_MODEM_GGWAVE;
+    tx_options.allow_high_frequency = allow_high_frequency;
+    tx_options.role = (uint8_t)KAL_ROLE_INITIATOR;
+    rx_options = tx_options;
+    rx_options.role = (uint8_t)KAL_ROLE_RESPONDER;
+
+    if (kal_link_create(&tx, &tx_options) != KAL_OK) {
+        return -1;
+    }
+    if (kal_link_create(&rx, &rx_options) != KAL_OK) {
+        kal_link_free(tx);
+        return -1;
+    }
+    kal_get_stats(tx, &stats);
+    capacity = (size_t)stats.frame_airtime_ms * KAL_SAMPLE_RATE / 1000u
+        + KAL_SAMPLE_RATE;
+
+    memset(&channel, 0, sizeof channel);
+    channel.kind = cell->kind;
+    channel.parameter = cell->parameter;
+    channel.secondary = cell->secondary;
+    channel.seed = seed;
+    damaged_capacity = kal_channel_output_samples(&channel, capacity)
+        + KAL_SAMPLE_RATE;
+
+    clean = (int16_t *)calloc(capacity, sizeof(int16_t));
+    damaged = (int16_t *)calloc(damaged_capacity, sizeof(int16_t));
+    if (clean == NULL || damaged == NULL) {
+        free(clean);
+        free(damaged);
+        kal_link_free(tx);
+        kal_link_free(rx);
+        return -1;
+    }
+    for (index = 0u; index < sizeof payload; ++index) {
+        payload[index] = (uint8_t)((index * 11u) + (size_t)seed);
+    }
+    if (kal_beacon(tx, payload, sizeof payload) == KAL_OK
+            && kal_tx_pull_s16(tx, clean, capacity, &written, 0u) == KAL_HAVE_OUTPUT
+            && written != 0u
+            && kal_channel_apply(&channel, clean, written, damaged,
+                                 damaged_capacity, &produced) == 0) {
+        (void)kal_rx_push_s16(rx, damaged, produced, 0u);
+        if (kal_receive(rx, received, sizeof received, &size) == KAL_OK
+                && size == sizeof payload
+                && memcmp(received, payload, size) == 0) {
+            ok = 1;
+        }
+    }
+    free(clean);
+    free(damaged);
+    kal_link_free(tx);
+    kal_link_free(rx);
+    return ok;
+}
+
+static int cmd_channel(const struct cli_options *options) {
+    const size_t cell_count =
+        sizeof cli_channel_cells / sizeof cli_channel_cells[0];
+    const unsigned int trials = options->seconds == 0u ? 3u : options->seconds;
+    size_t index;
+    unsigned long executed = 0u;
+
+    printf("# synthetic impairment matrix. No device is opened, nothing is\n");
+    printf("# played and nothing is recorded. This is not a room, a\n");
+    printf("# transducer or a device: it graduates 0/6 physical profiles and\n");
+    printf("# decides profile choice in 0/1 cases.\n");
+    printf("impairment,profile,delivered,trials\n");
+    for (index = 0u; index < cell_count; ++index) {
+        uint8_t profile;
+        for (profile = 0u; profile < (uint8_t)KAL_PROFILE_COUNT; ++profile) {
+            unsigned int delivered = 0u;
+            unsigned int attempt;
+            if (options->profile_selected != 0u && profile != options->profile) {
+                continue;
+            }
+            for (attempt = 0u; attempt < trials; ++attempt) {
+                const uint64_t seed = ((uint64_t)index << 32)
+                    + ((uint64_t)profile << 8) + attempt + 1u;
+                const int result = channel_trial(profile,
+                                                 &cli_channel_cells[index], seed,
+                                                 1u);
+                if (result < 0) {
+                    fprintf(stderr, "channel: link creation failed\n");
+                    return 1;
+                }
+                delivered += (unsigned int)result;
+                executed++;
+            }
+            printf("%s,%s,%u,%u\n", cli_channel_cells[index].name,
+                   kal_profile_string(profile), delivered, trials);
+        }
+    }
+    printf("# trials executed %lu/%lu\n", executed, executed);
+    printf("# physical profiles graduated 0/6\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     struct cli_options options;
     int index;
@@ -670,7 +822,7 @@ int main(int argc, char **argv) {
     options.profile = (uint8_t)KAL_PROFILE_AUDIBLE_NORMAL;
     options.window = 4u;
     options.role = (uint8_t)KAL_ROLE_INITIATOR;
-    options.seconds = 10u;
+    options.seconds = 0u;
 
     if (argc < 2) {
         usage(stderr);
@@ -699,6 +851,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "unknown profile: %s\n", value);
                 return 2;
             }
+            options.profile_selected = 1u;
             index++;
         } else if (strcmp(argument, "--window") == 0 && value != NULL) {
             options.window = (uint16_t)atoi(value); index++;
@@ -730,6 +883,7 @@ int main(int argc, char **argv) {
     }
 
     if (strcmp(options.command, "probe") == 0) return cmd_probe(&options);
+    if (strcmp(options.command, "channel") == 0) return cmd_channel(&options);
     if (strcmp(options.command, "loopback") == 0) return cmd_loopback(&options);
     if (strcmp(options.command, "dump-frame") == 0) return cmd_dump_frame(&options);
     if (strcmp(options.command, "send") == 0) return cmd_send(&options);

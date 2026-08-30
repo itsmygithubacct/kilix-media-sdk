@@ -53,13 +53,14 @@ Everything is vendored: the build and the tests make no network access.
 | `test_link` — reliability matrix under virtual time | 74/74 assertions, 43/43 items |
 | `test_bounds` — bounds, hostile input, integrity | 52/52 assertions, 21/21 items |
 | `test_modem` — pinned-engine conformance | 22/22 assertions, 20/20 items |
+| `test_channel` — synthetic impairment matrix | 106/106 assertions, 474/474 items |
 | `test_adapter` — audio child lifecycle | 27/27 assertions, 205/205 items |
 | `test_release_guard` — shipped library rejects the test backend | 4/4 assertions |
 | `fuzz_frame` — parser fuzz | 200,019/200,019 inputs, 0 canonical failures |
 
-The same five suites plus the fuzz target run again under
+The same six suites plus the fuzz target run again under
 AddressSanitizer + UndefinedBehaviorSanitizer with `-fno-sanitize-recover=all`:
-**6/6 sanitizer binaries pass.**
+**7/7 sanitizer binaries pass.**
 
 These are synthetic results. They graduate **0/6** physical profiles.
 
@@ -115,10 +116,78 @@ the pin:
 Reproduce with `kilix-acoustic-link probe`. These are engine numbers on a
 lossless in-memory channel. They are a floor, not a room measurement.
 
+## Channel behaviour under a synthetic impairment model
+
+One KAL1 frame is modulated by the pinned engine, damaged by a named
+impairment, and offered back to a receiving link. **Every waveform is in
+memory. This is not a room, a transducer, a microphone or a loudspeaker.**
+It graduates **0/6** physical profiles, and it decides profile choice in
+**0/1** cases — profile choice remains undecidable from digital results.
+
+What it does give is a reproducible floor and an ordering: an impairment a
+profile already fails here cannot be expected to pass in air.
+
+| Impairment | audible-normal | audible-fast | audible-fastest | dt-normal | dt-fast | high-normal | Asserted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `clean` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `awgn-20dB` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `awgn-6dB` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `awgn-0dB` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `awgn-minus9dB` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `awgn-minus11dB` | 3/3 | 3/3 | 2/3 | 3/3 | 3/3 | 3/3 | measured |
+| `awgn-minus12dB` | 3/3 | 0/3 | 0/3 | 3/3 | 3/3 | 3/3 | measured |
+| `gain-0.25x` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `gain-0.003x` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `gain-4x-sat` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `clip-0.5` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `clip-0.005` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `drift-plus100` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `drift-minus100` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `drift-plus1000` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `drift-plus2000` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 0/3 | measured |
+| `drift-plus5000` | 0/3 | 0/3 | 0/3 | 3/3 | 3/3 | 0/3 | measured |
+| `drift-plus10000` | 0/3 | 0/3 | 0/3 | 0/3 | 0/3 | 0/3 | measured |
+| `echo-10ms-0.5` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `echo-20ms-0.9` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+| `echo-50ms-0.25` | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | yes |
+
+378/378 trials executed; 96/96 asserted cells fully delivered.
+
+Three things this measured, none of which was assumed:
+
+1. **Amplitude barely matters.** Every profile survived 0.003x gain, 4x
+   saturating gain and clipping at 0.5% of full scale. Levels and automatic
+   gain control are not where this modem breaks.
+2. **Noise tolerance orders the profiles.** All six survive to −9 dB SNR
+   under this model. At −11 dB `audible-fastest` becomes marginal (2/3); at
+   −12 dB both `audible-fast` and `audible-fastest` fail (0/3) while
+   `audible-normal`, both dual-tone profiles and `high-normal` still deliver
+   3/3.
+3. **Sample-clock mismatch is the sharpest edge, and it is the one two real
+   devices always have.** All profiles survive ±1,000 ppm. `high-normal`
+   fails first at 2,000 ppm — its carrier is highest, so the same relative
+   error is the largest absolute error. The audible profiles fail at
+   5,000 ppm; the dual-tone profiles still deliver 3/3 there and fail by
+   10,000 ppm.
+
+Finding 3 is the one to carry into the room: an audio server that resamples,
+or two devices whose clocks disagree by more than about 0.1%, is a more
+likely failure mode here than either noise or level. **It does not select a
+profile.** It says which measurement the room matrix should make sure to
+take.
+
+Reproduce, or extend with more trials:
+
+```sh
+kilix-acoustic-link channel                       # all profiles, 3 trials
+kilix-acoustic-link channel --profile dt-normal --seconds 10
+```
+
 ## Diagnostic tool
 
 ```sh
 kilix-acoustic-link probe
+kilix-acoustic-link channel --profile audible-fastest
 kilix-acoustic-link loopback --profile audible-fastest --text "hello"
 kilix-acoustic-link dump-frame --hex <128 hex characters>
 kilix-acoustic-link beacon --text hi --output-pcm beacon.raw

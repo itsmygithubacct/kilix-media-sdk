@@ -39,7 +39,7 @@ SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer \
 CORE_SRC := src/kal_frame.c src/kal_sha256.c src/kal_random.c \
             src/kal_modem.c src/kal_link.c
 ENGINE_SRC := third_party/ggwave/src/ggwave.cpp
-TOOL_SRC := tools/kal_cli.c tools/kal_audio.c
+TOOL_SRC := tools/kal_cli.c tools/kal_audio.c tools/kal_channel.c
 
 CORE_OBJ   := $(CORE_SRC:%.c=$(BUILD)/%.o)
 ENGINE_OBJ := $(BUILD)/third_party/ggwave/src/ggwave.o
@@ -52,7 +52,7 @@ TOOL       := $(BUILD)/kilix-acoustic-link
 PC_FILE    := $(BUILD)/kilix-acoustic-link.pc
 
 TEST_SRC := tests/test_frame.c tests/test_link.c tests/test_bounds.c \
-            tests/test_modem.c tests/test_adapter.c
+            tests/test_modem.c tests/test_adapter.c tests/test_channel.c
 TEST_BIN := $(TEST_SRC:tests/%.c=$(BUILD)/%)
 SAN_BIN  := $(TEST_SRC:tests/%.c=$(BUILD)/san-%) $(BUILD)/san-fuzz_frame
 FUZZ_BIN := $(BUILD)/fuzz_frame
@@ -95,13 +95,15 @@ $(PC_FILE): kilix-acoustic-link.pc.in VERSION
 $(BUILD)/%: tests/%.c $(CORE_SRC) tools/kal_audio.c $(ENGINE_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS_KAL) -Itools -DKAL_ENABLE_TEST_MODEM=1 -Itests $< \
-	    $(CORE_SRC) tools/kal_audio.c $(ENGINE_OBJ) -lstdc++ -lm -o $@
+	    $(CORE_SRC) tools/kal_audio.c tools/kal_channel.c $(ENGINE_OBJ) \
+	    -lstdc++ -lm -o $@
 
 $(BUILD)/san-%: tests/%.c $(CORE_SRC) tools/kal_audio.c $(ENGINE_SRC)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS_KAL) $(SANITIZE) -c $(ENGINE_SRC) -o $(BUILD)/san-ggwave.o
 	$(CC) $(CFLAGS_KAL) $(SANITIZE) -Itools -DKAL_ENABLE_TEST_MODEM=1 -Itests $< \
-	    $(CORE_SRC) tools/kal_audio.c $(BUILD)/san-ggwave.o -lstdc++ -lm -o $@
+	    $(CORE_SRC) tools/kal_audio.c tools/kal_channel.c $(BUILD)/san-ggwave.o \
+	    -lstdc++ -lm -o $@
 
 $(FUZZ_BIN): tests/fuzz_frame.c $(CORE_SRC) $(ENGINE_OBJ)
 	@mkdir -p $(dir $@)

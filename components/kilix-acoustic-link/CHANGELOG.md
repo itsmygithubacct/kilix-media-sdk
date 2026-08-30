@@ -23,15 +23,20 @@ Physical profiles graduated: **0/6**.
   across lost delivered ACKs.
 - Pinned ggwave v0.4.3 vendored as modem-library source only, wrapped so no
   upstream type appears in the Kilix ABI.
-- Diagnostic tool with `probe`, `loopback`, `dump-frame`, file-backed
+- Diagnostic tool with `probe`, `channel`, `loopback`, `dump-frame`, file-backed
   `send`/`receive`/`beacon`, and `calibrate`; every device-backed path is
   refused without explicit authorization.
 - Audio child adapters with fixed argv, no shell, bounded teardown and
   reaping.
+- Synthetic channel impairment model (`tools/kal_channel.c`, diagnostic and
+  outside the library core): additive white Gaussian noise at a target SNR,
+  gain, hard clipping, sample-clock drift in ppm, and a single delayed
+  reflection. Deterministic by seed, and self-checked — the achieved SNR is
+  verified against the requested one.
 - Test suites: codec conformance, reliability matrix under virtual time,
-  bounds and hostile input, pinned-engine conformance, adapter lifecycle, a
-  release-library guard, and a parser fuzz target; all run again under
-  AddressSanitizer and UndefinedBehaviorSanitizer.
+  bounds and hostile input, pinned-engine conformance, a channel impairment
+  matrix, adapter lifecycle, a release-library guard, and a parser fuzz
+  target; all run again under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 ### Recorded during integration
 
@@ -45,6 +50,12 @@ Physical profiles graduated: **0/6**.
 - Selective repeat without in-flight tracking live-locked under a duplicating
   channel: every duplicate provoked an ACK, and every ACK re-queued the whole
   window. Found by the duplication scenario in `tests/test_link.c`.
+- Under the synthetic impairment model, sample-clock mismatch is the sharpest
+  edge: every profile survives +/-1,000 ppm, `high-normal` fails at 2,000 ppm,
+  the audible profiles fail at 5,000 ppm and the dual-tone profiles survive
+  5,000 ppm. Amplitude is nearly irrelevant by comparison (0.003x gain and
+  0.5% clipping both deliver 3/3 everywhere). This orders the profiles under
+  one model; it selects none.
 
 ### Not done, and why
 
