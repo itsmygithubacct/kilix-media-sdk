@@ -5,7 +5,7 @@
 
 COMPONENTS := kilix-acoustic-link
 
-.PHONY: all test clean install manifest help
+.PHONY: all test clean install manifest verify-vendor help
 
 all:
 	@set -e; for component in $(COMPONENTS); do \
@@ -13,11 +13,16 @@ all:
 	    $(MAKE) -C components/$$component; \
 	done
 
-test:
+test: verify-vendor
 	@set -e; for component in $(COMPONENTS); do \
 	    echo "== test components/$$component"; \
 	    $(MAKE) -C components/$$component test; \
 	done
+
+# Check the vendored third-party trees against manifest.toml before anything
+# else runs. Declaring a digest that nothing recomputes is not a control.
+verify-vendor:
+	@sh tools/verify-vendored-tree.sh
 
 install:
 	@set -e; for component in $(COMPONENTS); do \
@@ -36,4 +41,4 @@ manifest:
 	done
 
 help:
-	@echo "targets: all test install clean manifest"
+	@echo "targets: all test install clean manifest verify-vendor"

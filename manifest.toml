@@ -30,6 +30,34 @@ licence = "MIT"
 delivery = "vendored-source"
 vendored_tree_sha256 = "24b5b18deb767e4ce1156aed0f9359b79c6ade2b647848ca3c6a255827307de2"
 
+# How vendored_tree_sha256 is derived, and why the order is written out.
+#
+# The value was produced by, from vendored_tree_root:
+#     sha256sum $(find . -type f | sort) | sha256sum
+# `sort` there used the ambient locale. Under en_US.UTF-8 that orders
+# `include/ggwave/ggwave.h` before `LICENSE`; under LC_ALL=C it does not, and
+# the same unchanged tree then digests to
+# b2551d3f31da694c4fdb5f739d9a2c003ede165fbdb713993f08acfcf96796aa.
+# Neither digest is more correct than the other -- but a rule that depends on
+# the operator's locale is not a rule. vendored_tree_files below fixes the
+# order explicitly so the derivation is reproducible anywhere, and it doubles
+# as the closure: a file added to or removed from the tree fails the check even
+# if every remaining file still hashes correctly.
+#
+# Verified by `make verify-vendor`, which the aggregate `make test` runs first.
+vendored_tree_root = "components/kilix-acoustic-link/third_party/ggwave"
+vendored_tree_digest_rule = "sha256sum ./<each vendored_tree_files entry, in this order> | sha256sum"
+vendored_tree_files = [
+    "include/ggwave/ggwave.h",
+    "LICENSE",
+    "src/fft.h",
+    "src/ggwave.cpp",
+    "src/reed-solomon/gf.hpp",
+    "src/reed-solomon/LICENSE",
+    "src/reed-solomon/poly.hpp",
+    "src/reed-solomon/rs.hpp",
+]
+
 # Named in the F111 placement decision, NOT migrated and NOT present here.
 # Their migration is a separate reviewed history-preserving move owned by
 # their own streams.
