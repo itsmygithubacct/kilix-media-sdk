@@ -32,6 +32,7 @@ CXXFLAGS_KAL := -std=c++11 $(WARN_CXX) $(COMMON_FLAGS) \
                 -fvisibility=hidden -Ithird_party/ggwave/include \
                 -Ithird_party/ggwave/src
 LDFLAGS_KAL  := -Wl,-z,relro -Wl,-z,now
+BOUNDS_WRAP := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free
 
 SANITIZE := -fsanitize=address,undefined -fno-omit-frame-pointer \
             -fno-sanitize-recover=all
@@ -96,14 +97,14 @@ $(BUILD)/%: tests/%.c $(CORE_SRC) tools/kal_audio.c $(ENGINE_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS_KAL) -Itools -DKAL_ENABLE_TEST_MODEM=1 -Itests $< \
 	    $(CORE_SRC) tools/kal_audio.c tools/kal_channel.c $(ENGINE_OBJ) \
-	    -lstdc++ -lm -o $@
+	    $(if $(filter test_bounds,$*),$(BOUNDS_WRAP)) -lstdc++ -lm -o $@
 
 $(BUILD)/san-%: tests/%.c $(CORE_SRC) tools/kal_audio.c $(ENGINE_SRC)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS_KAL) $(SANITIZE) -c $(ENGINE_SRC) -o $(BUILD)/san-ggwave.o
 	$(CC) $(CFLAGS_KAL) $(SANITIZE) -Itools -DKAL_ENABLE_TEST_MODEM=1 -Itests $< \
 	    $(CORE_SRC) tools/kal_audio.c tools/kal_channel.c $(BUILD)/san-ggwave.o \
-	    -lstdc++ -lm -o $@
+	    $(if $(filter test_bounds,$*),$(BOUNDS_WRAP)) -lstdc++ -lm -o $@
 
 $(FUZZ_BIN): tests/fuzz_frame.c $(CORE_SRC) $(ENGINE_OBJ)
 	@mkdir -p $(dir $@)

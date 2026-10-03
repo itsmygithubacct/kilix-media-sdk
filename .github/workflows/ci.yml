@@ -27,7 +27,4 @@ jobs:
             DESTDIR="${RUNNER_TEMP}/stage" PREFIX=/usr
           test -z "$(find "${RUNNER_TEMP}/stage" -type f -o -type l)"
       - name: Vendored third-party digest
-        run: |
-          cd components/kilix-acoustic-link/third_party/ggwave
-          find . -type f | sort | xargs sha256sum | sha256sum \
-            | grep -q 24b5b18deb767e4ce1156aed0f9359b79c6ade2b647848ca3c6a255827307de2
+        run: make verify-vendor

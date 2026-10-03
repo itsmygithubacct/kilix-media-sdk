@@ -13,6 +13,39 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+
+/* These counters cover direct allocator calls from the linked objects,
+ * including the core; they do not interpose inside shared libc/libstdc++.
+ * Keep the RSS check as an independent observer. */
+static int measuring_allocations;
+static unsigned long allocation_calls;
+static unsigned long deallocation_calls;
+void *__real_malloc(size_t size);
+void *__real_calloc(size_t count, size_t size);
+void *__real_realloc(void *pointer, size_t size);
+void __real_free(void *pointer);
+void *__wrap_malloc(size_t size);
+void *__wrap_calloc(size_t count, size_t size);
+void *__wrap_realloc(void *pointer, size_t size);
+void __wrap_free(void *pointer);
+
+void *__wrap_malloc(size_t size) {
+    if (measuring_allocations) allocation_calls++;
+    return __real_malloc(size);
+}
+void *__wrap_calloc(size_t count, size_t size) {
+    if (measuring_allocations) allocation_calls++;
+    return __real_calloc(count, size);
+}
+void *__wrap_realloc(void *pointer, size_t size) {
+    if (measuring_allocations) allocation_calls++;
+    return __real_realloc(pointer, size);
+}
+void __wrap_free(void *pointer) {
+    if (measuring_allocations) deallocation_calls++;
+    __real_free(pointer);
+}
 
 #define TEST_SYNC_SAMPLES 4u
 #define TEST_FRAME_SAMPLES (TEST_SYNC_SAMPLES + KAL_FRAME_BYTES)
@@ -43,18 +76,32 @@ static kal_options options_for(uint8_t role) {
     return options;
 }
 
-static long resident_pages(void) {
-    FILE *file = fopen("/proc/self/statm", "r");
-    long total = 0;
-    long resident = 0;
+static long resident_kib(void) {
+    FILE *file = fopen("/proc/self/smaps_rollup", "r");
+    char line[256];
+    long resident = -1;
     if (file == NULL) {
         return -1;
     }
-    if (fscanf(file, "%ld %ld", &total, &resident) != 2) {
-        resident = -1;
+    while (fgets(line, sizeof line, file) != NULL) {
+        if (sscanf(line, "Rss: %ld kB", &resident) == 1) break;
     }
     (void)fclose(file);
     return resident;
+}
+
+static void check_rss_bound(long before, long after, const char *name) {
+    KAL_CHECK(before > 0 && after > 0);
+#if defined(__SANITIZE_ADDRESS__)
+    /* Preserve the original separate ASan allowance of 1024 pages. */
+    const long page_kib = sysconf(_SC_PAGESIZE) / 1024;
+    KAL_CHECK(page_kib > 0);
+    KAL_CHECK((after - before) < 1024 * page_kib);
+    printf("  %s RSS delta (ASan accounting, KiB) %ld\n", name, after - before);
+#else
+    KAL_CHECK(after <= before);
+    printf("  %s accurate RSS delta (KiB) %ld\n", name, after - before);
+#endif
 }
 
 static void check_option_validation(void) {
@@ -256,7 +303,11 @@ static void check_hostile_flood_is_bounded(void) {
             now += 10u;
         }
     }
-    before = resident_pages();
+    /* Warm the observer too. statm's asynchronous RSS accounting cannot
+     * enforce an exact zero-growth bound. smaps_rollup reads accurate RSS. */
+    (void)resident_kib();
+    (void)resident_kib();
+    before = resident_kib();
     for (round = 0u; round < 4u; ++round) {
         for (index = 0u; index < 2000u; ++index) {
             struct kal_frame frame;
@@ -290,23 +341,116 @@ static void check_hostile_flood_is_bounded(void) {
             now += 10u;
         }
     }
-    after = resident_pages();
+    after = resident_kib();
     kal_get_stats(link, &stats);
-    KAL_CHECK(before > 0 && after > 0);
-#if defined(__SANITIZE_ADDRESS__)
-    /* A sanitizer keeps its own shadow and quarantine, so resident pages are
-     * not a measurement of the library here. The strict zero-growth check is
-     * the normal build's; this build proves memory safety instead. */
-    KAL_CHECK((after - before) < 1024);
-    KAL_GROUP("resident page growth bound (sanitizer build)", 1u, 1u);
-    printf("  resident page growth (sanitizer accounting)  %ld\n", after - before);
-#else
-    KAL_CHECK(after <= before);
-    KAL_GROUP("resident page growth under 8000 hostile frames",
-              (unsigned long)(after - before), 0u);
-#endif
+    check_rss_bound(before, after, "8000 hostile frames");
     printf("  hostile frames pushed                        %u/%u\n", 8000u, 8000u);
     kal_link_free(link);
+}
+
+static kal_result push_frame(kal_link *link, struct kal_frame *frame,
+                             uint64_t *now) {
+    uint8_t encoded[KAL_FRAME_BYTES];
+    int16_t pcm[TEST_FRAME_SAMPLES];
+    if (kal_frame_encode(frame, encoded) != KAL_WIRE_OK) return KAL_ERR_INVALID;
+    (void)modulate(encoded, pcm);
+    *now += 10u;
+    return kal_rx_push_s16(link, pcm, TEST_FRAME_SAMPLES, *now);
+}
+
+static unsigned int partial_messages(kal_link *link, uint64_t *now,
+                                      unsigned int count, unsigned int start) {
+    unsigned int index;
+    unsigned int accepted = 0u;
+    for (index = 0u; index < count; ++index) {
+        struct kal_frame frame;
+        memset(&frame, 0, sizeof frame);
+        frame.type = (uint8_t)KAL_TYPE_DATA;
+        frame.session_id = 0x1234u;
+        frame.message_id = (uint16_t)(start + index / 89u);
+        frame.sequence = (uint16_t)(index % 89u);
+        frame.value = 90u; /* Replace each message before its final frame. */
+        frame.payload_length = (uint8_t)KAL_PAYLOAD_BYTES;
+        memset(frame.payload, (int)(index & 0xffu), sizeof frame.payload);
+        if (push_frame(link, &frame, now) == KAL_OK) accepted++;
+    }
+    return accepted;
+}
+
+static void check_partial_sessions_have_bounded_rss(void) {
+    kal_options options = options_for((uint8_t)KAL_ROLE_RESPONDER);
+    kal_link *link = NULL;
+    struct kal_frame hello;
+    kal_stats baseline, final;
+    uint64_t now = 0u;
+    long before, after;
+    unsigned int accepted = 0u;
+    unsigned int round;
+
+    KAL_CHECK(kal_link_create(&link, &options) == KAL_OK);
+    if (link == NULL) return;
+    memset(&hello, 0, sizeof hello);
+    hello.type = (uint8_t)KAL_TYPE_HELLO;
+    hello.session_id = 0x1234u;
+    hello.value = kal_capability_pack(options.profile, options.window_frames);
+    hello.payload_length = KAL_CHALLENGE_BYTES;
+    memset(hello.payload, 0x56, KAL_CHALLENGE_BYTES);
+    KAL_CHECK(push_frame(link, &hello, &now) == KAL_OK);
+    /* Warm actual receive-buffer clearing and partial-message replacement. */
+    KAL_CHECK(partial_messages(link, &now, 4000u, 1u) == 4000u);
+    kal_get_stats(link, &baseline);
+    KAL_CHECK(baseline.session_open == 1u);
+    KAL_CHECK(baseline.frames_rejected == 0u);
+    KAL_CHECK(baseline.messages_delivered == 0u);
+    (void)resident_kib();
+    (void)resident_kib();
+    before = resident_kib();
+    allocation_calls = deallocation_calls = 0u;
+    measuring_allocations = 1;
+    for (round = 0u; round < 4u; ++round) {
+        accepted += partial_messages(link, &now, 2000u, 1000u + round * 1000u);
+    }
+    measuring_allocations = 0;
+    after = resident_kib();
+    kal_get_stats(link, &final);
+    KAL_CHECK(accepted == 8000u);
+    KAL_CHECK(final.session_open == 1u);
+    KAL_CHECK(final.frames_received - baseline.frames_received == 8000u);
+    KAL_CHECK(final.frames_rejected == baseline.frames_rejected);
+    KAL_CHECK(final.messages_delivered == baseline.messages_delivered);
+    KAL_CHECK(allocation_calls == 0u);
+    KAL_CHECK(deallocation_calls == 0u);
+    check_rss_bound(before, after, "8000 accepted partial DATA frames");
+    KAL_GROUP("accepted incomplete-message frames", accepted, 8000u);
+    printf("  partial DATA alloc/free calls                 %lu/%lu\n",
+           allocation_calls, deallocation_calls);
+    kal_link_free(link);
+}
+
+static void check_allocation_observer_detects_control(void) {
+    /* Volatile pointers keep -O2 from eliding these ordinary allocator calls;
+     * the linker must route them through the same hooks as the core. */
+    void *(*volatile allocate)(size_t) = malloc;
+    void *(*volatile allocate_zeroed)(size_t, size_t) = calloc;
+    void *(*volatile resize)(void *, size_t) = realloc;
+    void (*volatile release)(void *) = free;
+    void *control, *zeroed, *resized;
+    allocation_calls = deallocation_calls = 0u;
+    measuring_allocations = 1;
+    control = allocate(4096u);
+    if (control != NULL) memset(control, 0xab, 4096u);
+    KAL_CHECK(control != NULL);
+    KAL_CHECK(allocation_calls == 1u);
+    zeroed = allocate_zeroed(1u, 4096u);
+    KAL_CHECK(zeroed != NULL);
+    KAL_CHECK(allocation_calls == 2u);
+    resized = resize(control, 8192u);
+    KAL_CHECK(resized != NULL);
+    KAL_CHECK(allocation_calls == 3u);
+    release(resized != NULL ? resized : control);
+    release(zeroed);
+    KAL_CHECK(deallocation_calls == 2u);
+    measuring_allocations = 0;
 }
 
 static void check_random_pcm_never_delivers(void) {
@@ -398,6 +542,8 @@ int main(void) {
     check_message_size_limits();
     check_corrupted_complete_message_is_never_delivered();
     check_hostile_flood_is_bounded();
+    check_partial_sessions_have_bounded_rss();
+    check_allocation_observer_detects_control();
     check_random_pcm_never_delivers();
     check_receive_capacity();
     check_null_arguments();
